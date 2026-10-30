@@ -1,0 +1,8 @@
+[package]
+name = "video_merger_gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.29" # Thư viện GUI (egui)
+rfd = "0.14"   # Thư viện mở hộp thoại chọn file (File Dialog)
