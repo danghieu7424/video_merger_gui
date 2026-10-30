@@ -78,18 +78,21 @@ impl Default for VideoMergerApp {
 
 impl VideoMergerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // --- NẠP FONT TIẾNG VIỆT TỪ HỆ THỐNG WINDOWS ---
+        // --- NẠP FONT TIẾNG VIỆT TỪ HỆ THỐNG WINDOWS (HỖ TRỢ CẢ PROPORTIONAL & MONOSPACE) ---
         let mut fonts = egui::FontDefinitions::default();
         if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
             fonts.font_data.insert(
                 "segoe_ui".to_owned(),
                 egui::FontData::from_owned(font_data),
             );
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .insert(0, "segoe_ui".to_owned());
+            // Gán cho Proportional (chữ thường, UI)
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "segoe_ui".to_owned());
+            }
+            // Gán cho Monospace để chữ "Đã xử lý..." trong progress không bị ô vuông lỗi font
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                family.insert(0, "segoe_ui".to_owned());
+            }
         }
         cc.egui_ctx.set_fonts(fonts);
         Self::default()
@@ -326,12 +329,11 @@ impl VideoMergerApp {
         // --- 6. KHỐI PIPELINE PROGRESS REAL-TIME ---
         ui.group(|ui| {
             let progress_bar = egui::ProgressBar::new(self.progress_ratio)
-                .show_percentage()
-                .animate(self.is_processing);
+                .show_percentage();
             ui.add(progress_bar);
 
             if !self.progress_line.is_empty() {
-                ui.monospace(&self.progress_line);
+                ui.label(egui::RichText::new(&self.progress_line).strong());
             }
             if !self.detail_log.is_empty() {
                 ui.label(egui::RichText::new(&self.detail_log).color(egui::Color32::from_rgb(100, 220, 100)));
@@ -473,7 +475,8 @@ impl VideoMergerApp {
 
         // Chuyển hướng stdout để đọc realtime progress
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
+        // Không pipe stderr nếu không đọc để tránh tràn buffer hệ điều hành làm đứng FFmpeg
+        cmd.stderr(Stdio::null());
 
         let start_time = Instant::now();
         let mut child = match cmd.spawn() {
@@ -486,31 +489,32 @@ impl VideoMergerApp {
 
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
+            let mut last_emit = Instant::now();
+
             for line in reader.lines().flatten() {
-                // FFmpeg trả về dạng: out_time_ms=12345000 hoặc out_time_us=...
-                if line.starts_with("out_time_us=") || line.starts_with("out_time_ms=") {
+                // CHỈ parse out_time_us (microsecond) để đảm bảo độ chính xác tuyệt đối
+                if line.starts_with("out_time_us=") {
                     let parts: Vec<&str> = line.split('=').collect();
                     if parts.len() == 2 {
-                        if let Ok(time_val) = parts[1].trim().parse::<u64>() {
-                            let current_secs = if line.starts_with("out_time_us=") {
-                                time_val / 1_000_000
-                            } else {
-                                time_val / 1_000
-                            };
+                        if let Ok(time_us) = parts[1].trim().parse::<u64>() {
+                            // Giới hạn tần số gửi tin: tối đa 15 tin/giây (~66ms) để UI render siêu mượt, không giật lag
+                            if last_emit.elapsed().as_millis() >= 66 {
+                                last_emit = Instant::now();
+                                let current_secs = time_us / 1_000_000;
+                                let elapsed_secs = start_time.elapsed().as_secs();
+                                let percent = if total_duration > 0.0 {
+                                    ((current_secs as f64 / total_duration) as f32).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
 
-                            let elapsed_secs = start_time.elapsed().as_secs();
-                            let percent = if total_duration > 0.0 {
-                                ((current_secs as f64 / total_duration) as f32).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-
-                            let _ = tx.send(MergeProgressMsg::Progress {
-                                percent,
-                                elapsed_secs,
-                                current_time_secs: current_secs,
-                                total_secs: total_duration as u64,
-                            });
+                                let _ = tx.send(MergeProgressMsg::Progress {
+                                    percent,
+                                    elapsed_secs,
+                                    current_time_secs: current_secs,
+                                    total_secs: total_duration as u64,
+                                });
+                            }
                         }
                     }
                 }
