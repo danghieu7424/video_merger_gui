@@ -77,43 +77,49 @@ impl eframe::App for VideoMergerApp {
 
             ui.add_space(5.0);
 
-            // --- 2. CHỌN ÂM THANH (Hỗ trợ vô hạn file) ---
+            // --- 2. CHỌN ÂM THANH (Hỗ trợ chọn nhiều file cùng lúc) ---
             ui.horizontal(|ui| {
                 if ui.button("🎵 Thêm File Audio (MP3/AAC/MP4)").clicked() {
-                    if let Some(path) = FileDialog::new().pick_file() {
-                        self.audio_paths.push(path.display().to_string());
+                    if let Some(paths) = FileDialog::new().pick_files() {
+                        for path in paths {
+                            self.audio_paths.push(path.display().to_string());
+                        }
                     }
                 }
                 ui.label(format!("Đã chọn: {} audio track", self.audio_paths.len()));
+                if ui.button("🗑 Xóa hết").clicked() {
+                    self.audio_paths.clear();
+                }
             });
 
             for (i, audio) in self.audio_paths.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.indent(format!("audio_{}", i), |ui| {
-                        let lang = Self::detect_language_from_filename(audio);
-                        ui.label(format!("• Track bổ sung #{0} [Mã NV: {1}]: {2}", i + 1, lang.to_uppercase(), audio));
-                    });
+                let lang = Self::detect_language_from_filename(audio);
+                ui.indent(format!("audio_{}", i), |ui| {
+                    ui.label(format!("• Track bổ sung #{0} [Mã ISO: {1}]: {2}", i + 1, lang.to_uppercase(), audio));
                 });
             }
 
             ui.add_space(5.0);
 
-            // --- 3. CHỌN PHỤ ĐỀ (Hỗ trợ vô hạn file .vtt / .srt) ---
+            // --- 3. CHỌN PHỤ ĐỀ (Hỗ trợ chọn nhiều file .vtt / .srt) ---
             ui.horizontal(|ui| {
                 if ui.button("💬 Thêm Phụ Đề (.vtt / .srt)").clicked() {
-                    if let Some(path) = FileDialog::new().pick_file() {
-                        self.sub_paths.push(path.display().to_string());
+                    if let Some(paths) = FileDialog::new().pick_files() {
+                        for path in paths {
+                            self.sub_paths.push(path.display().to_string());
+                        }
                     }
                 }
                 ui.label(format!("Đã chọn: {} sub track", self.sub_paths.len()));
+                if ui.button("🗑 Xóa hết").clicked() {
+                    self.sub_paths.clear();
+                }
             });
 
             for (i, sub) in self.sub_paths.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.indent(format!("sub_{}", i), |ui| {
-                        let lang = Self::detect_language_from_filename(sub);
-                        ui.label(format!("• Phụ đề #{0} [Mã NV: {1}]: {2}", i + 1, lang.to_uppercase(), sub));
-                    });
+                let lang = Self::detect_language_from_filename(sub);
+                ui.indent(format!("sub_{}", i), |ui| {
+                    ui.label(format!("• Phụ đề #{0} [Mã ISO: {1}]: {2}", i + 1, lang.to_uppercase(), sub));
                 });
             }
 
@@ -220,7 +226,7 @@ impl VideoMergerApp {
     // Hàm thông minh phân tích tên file để tự động gán mã ngôn ngữ chuẩn quốc tế (ISO 639-2)
     fn detect_language_from_filename(path: &str) -> &'static str {
         let lower = path.to_lowercase();
-        if lower.contains(".vi.") || lower.contains("_vi.") || lower.contains("vi.vtt") || lower.contains("vietnamese") {
+        if lower.contains(".vi.") || lower.contains("_vi.") || lower.contains("vi.vtt") || lower.contains("vietnamese") || lower.contains(".dubbed.") {
             "vie"
         } else if lower.contains(".zh.") || lower.contains("_zh.") || lower.contains("zh.vtt") || lower.contains("cn") || lower.contains("chinese") {
             "chi"
@@ -231,7 +237,7 @@ impl VideoMergerApp {
         } else if lower.contains(".ko.") || lower.contains("_ko.") || lower.contains("ko.vtt") || lower.contains("korean") {
             "kor"
         } else {
-            "und" // Mặc định nếu không nhận diện được chuỗi ngôn ngữ
+            "chi" // Mặc định video gốc nếu không có hậu tố dubbed thường là tiếng Trung
         }
     }
 }
