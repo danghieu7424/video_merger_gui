@@ -12,4 +12,18 @@ if (!(Test-Path "dist")) {
 Write-Host ">>> [3/3] Sao chép tệp thực thi và tài liệu..." -ForegroundColor Cyan
 Copy-Item "target\release\video_merger_gui.exe" "dist\" -Force
 
+# Sao chép ffmpeg và ffprobe đi kèm nếu có sẵn trong hệ thống
+$ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+$ffprobeCmd = Get-Command ffprobe -ErrorAction SilentlyContinue
+
+if ($ffmpegCmd) {
+    Copy-Item $ffmpegCmd.Source "dist\" -Force
+    Write-Host "    + Đã đính kèm: ffmpeg.exe" -ForegroundColor Green
+}
+if ($ffprobeCmd) {
+    Copy-Item $ffprobeCmd.Source "dist\" -Force
+    Write-Host "    + Đã đính kèm: ffprobe.exe" -ForegroundColor Green
+}
+
 Write-Host ">>> HOÀN TẤT! Sản phẩm sẵn sàng tại: dist\video_merger_gui.exe" -ForegroundColor Green
+

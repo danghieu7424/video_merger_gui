@@ -425,6 +425,25 @@ impl VideoMergerApp {
  * Đầu ra: Bắn liên tục MergeProgressMsg qua kênh sender tx.
  ****/
 impl VideoMergerApp {
+    // Hàm tìm đường dẫn binary thực thi (ưu tiên file nằm cùng thư mục exe, nếu không có thì tìm trong PATH hệ thống)
+    fn get_binary_path(binary_name: &str) -> std::path::PathBuf {
+        let exe_name = if cfg!(windows) {
+            format!("{}.exe", binary_name)
+        } else {
+            binary_name.to_string()
+        };
+
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(parent) = current_exe.parent() {
+                let local_bin = parent.join(&exe_name);
+                if local_bin.exists() {
+                    return local_bin;
+                }
+            }
+        }
+        std::path::PathBuf::from(binary_name)
+    }
+
     fn execute_ffmpeg_merge(
         video_path: &str,
         audio_paths: &[String],
@@ -436,7 +455,8 @@ impl VideoMergerApp {
         cancel_flag: Arc<AtomicBool>,
         tx: &Sender<MergeProgressMsg>,
     ) {
-        let mut cmd = Command::new("ffmpeg");
+        let ffmpeg_bin = Self::get_binary_path("ffmpeg");
+        let mut cmd = Command::new(ffmpeg_bin);
 
         // Ghi đè file nếu đã tồn tại (-y) tránh việc ffmpeg dừng đợi prompt stdin
         cmd.arg("-y");
@@ -570,8 +590,10 @@ impl VideoMergerApp {
 
     // Trích xuất metadata độ phân giải, thời lượng và kiểm tra sub có sẵn bằng ffprobe
     fn probe_video_metadata(path: &str) -> (String, f64, bool) {
+        let ffprobe_bin = Self::get_binary_path("ffprobe");
+
         // 1. Lấy chiều cao (height) để xác định 720p / 1080p / 4K
-        let height_res = Command::new("ffprobe")
+        let height_res = Command::new(&ffprobe_bin)
             .args(&[
                 "-v", "error",
                 "-select_streams", "v:0",
@@ -594,7 +616,7 @@ impl VideoMergerApp {
         };
 
         // 2. Lấy thời lượng (duration tính theo giây)
-        let dur_res = Command::new("ffprobe")
+        let dur_res = Command::new(&ffprobe_bin)
             .args(&[
                 "-v", "error",
                 "-show_entries", "format=duration",
@@ -612,7 +634,7 @@ impl VideoMergerApp {
         };
 
         // 3. Kiểm tra file gốc có chứa subtitle stream nào không
-        let sub_res = Command::new("ffprobe")
+        let sub_res = Command::new(&ffprobe_bin)
             .args(&[
                 "-v", "error",
                 "-select_streams", "s",
