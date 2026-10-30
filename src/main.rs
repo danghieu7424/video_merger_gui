@@ -31,22 +31,17 @@ impl VideoMergerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // --- NẠP FONT TIẾNG VIỆT TỪ HỆ THỐNG WINDOWS ---
         let mut fonts = egui::FontDefinitions::default();
-        
-        // Thêm font Segoe UI từ thư mục Windows Fonts để hỗ trợ tiếng Việt đầy đủ
         if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
             fonts.font_data.insert(
                 "segoe_ui".to_owned(),
                 egui::FontData::from_owned(font_data),
             );
-            
-            // Đưa font vào danh sách ưu tiên cho Proportional
             fonts
                 .families
                 .get_mut(&egui::FontFamily::Proportional)
                 .unwrap()
                 .insert(0, "segoe_ui".to_owned());
         }
-
         cc.egui_ctx.set_fonts(fonts);
         Self::default()
     }
@@ -54,7 +49,6 @@ impl VideoMergerApp {
 
 impl eframe::App for VideoMergerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Tăng kích thước style chung cho đỡ thô
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10.0, 10.0);
         style.spacing.button_padding = egui::vec2(12.0, 8.0);
@@ -62,7 +56,7 @@ impl eframe::App for VideoMergerApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(5.0);
-            ui.heading("🎬 Trình Gộp Video & Phụ Đề (Rust)");
+            ui.heading("🎬 Trình Gộp Video & Phụ Đề Đa Ngôn Ngữ (Rust)");
             ui.separator();
             ui.add_space(5.0);
 
@@ -83,9 +77,9 @@ impl eframe::App for VideoMergerApp {
 
             ui.add_space(5.0);
 
-            // --- 2. CHỌN ÂM THANH ---
+            // --- 2. CHỌN ÂM THANH (Hỗ trợ vô hạn file) ---
             ui.horizontal(|ui| {
-                if ui.button("🎵 Thêm File Audio (MP3/AAC)").clicked() {
+                if ui.button("🎵 Thêm File Audio (MP3/AAC/MP4)").clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         self.audio_paths.push(path.display().to_string());
                     }
@@ -96,16 +90,17 @@ impl eframe::App for VideoMergerApp {
             for (i, audio) in self.audio_paths.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.indent(format!("audio_{}", i), |ui| {
-                        ui.label(format!("• Track #{}: {}", i + 1, audio));
+                        let lang = Self::detect_language_from_filename(audio);
+                        ui.label(format!("• Track bổ sung #{0} [Mã NV: {1}]: {2}", i + 1, lang.to_uppercase(), audio));
                     });
                 });
             }
 
             ui.add_space(5.0);
 
-            // --- 3. CHỌN PHỤ ĐỀ ---
+            // --- 3. CHỌN PHỤ ĐỀ (Hỗ trợ vô hạn file .vtt / .srt) ---
             ui.horizontal(|ui| {
-                if ui.button("💬 Thêm Phụ Đề (.vtt)").clicked() {
+                if ui.button("💬 Thêm Phụ Đề (.vtt / .srt)").clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         self.sub_paths.push(path.display().to_string());
                     }
@@ -116,7 +111,8 @@ impl eframe::App for VideoMergerApp {
             for (i, sub) in self.sub_paths.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.indent(format!("sub_{}", i), |ui| {
-                        ui.label(format!("• Sub #{}: {}", i + 1, sub));
+                        let lang = Self::detect_language_from_filename(sub);
+                        ui.label(format!("• Phụ đề #{0} [Mã NV: {1}]: {2}", i + 1, lang.to_uppercase(), sub));
                     });
                 });
             }
@@ -163,6 +159,7 @@ impl VideoMergerApp {
     fn run_ffmpeg_merge(&self) -> Result<(), String> {
         let mut cmd = Command::new("ffmpeg");
 
+        // 1. Khai báo lần lượt các input file vào FFmpeg
         cmd.arg("-i").arg(&self.video_path);
 
         for audio in &self.audio_paths {
@@ -173,31 +170,41 @@ impl VideoMergerApp {
             cmd.arg("-i").arg(sub);
         }
 
+        // 2. Map Stream tự động chính xác theo thứ tự input
+        // Map hình ảnh từ video gốc
         cmd.arg("-map").arg("0:v:0");
 
+        // Map audio: bắt đầu từ audio của video gốc (index 0) đến các audio bổ sung tiếp theo
         let total_audio_inputs = 1 + self.audio_paths.len();
         for i in 0..total_audio_inputs {
             cmd.arg("-map").arg(format!("{}:a:0", i));
         }
 
+        // Map subtitle: bắt đầu từ index ngay sau các file audio
         let base_sub_index = total_audio_inputs;
         for (i, _) in self.sub_paths.iter().enumerate() {
             cmd.arg("-map").arg(format!("{}:s:0", base_sub_index + i));
         }
 
+        // 3. Cấu hình Codec đầu ra
         cmd.arg("-c:v").arg(&self.video_codec);
         cmd.arg("-c:a").arg("aac");
         cmd.arg("-c:s").arg("webvtt");
 
-        cmd.arg("-metadata:s:a:0").arg("language=chi");
-        if !self.audio_paths.is_empty() {
-            cmd.arg("-metadata:s:a:1").arg("language=vie");
+        // 4. Gán Metadata ngôn ngữ động cho Audio gốc
+        let video_audio_lang = Self::detect_language_from_filename(&self.video_path);
+        cmd.arg("-metadata:s:a:0").arg(format!("language={}", video_audio_lang));
+
+        // 5. Gán Metadata ngôn ngữ động cho các Audio bổ sung (index từ 1 trở đi)
+        for (i, audio_path) in self.audio_paths.iter().enumerate() {
+            let lang = Self::detect_language_from_filename(audio_path);
+            cmd.arg(format!("-metadata:s:a:{}", i + 1)).arg(format!("language={}", lang));
         }
-        if !self.sub_paths.is_empty() {
-            cmd.arg("-metadata:s:s:0").arg("language=chi");
-        }
-        if self.sub_paths.len() > 1 {
-            cmd.arg("-metadata:s:s:1").arg("language=vie");
+
+        // 6. Gán Metadata ngôn ngữ động cho Subtitle streams (index từ 0 trở đi)
+        for (i, sub_path) in self.sub_paths.iter().enumerate() {
+            let lang = Self::detect_language_from_filename(sub_path);
+            cmd.arg(format!("-metadata:s:s:{}", i)).arg(format!("language={}", lang));
         }
 
         cmd.arg("output.mkv");
@@ -206,7 +213,25 @@ impl VideoMergerApp {
         if status.success() {
             Ok(())
         } else {
-            Err(String::from("FFmpeg thực thi thất bại, kiểm tra lại định dạng file."))
+            Err(String::from("FFmpeg thực thi thất bại, kiểm tra lại định dạng file hoặc cú pháp lệnh."))
+        }
+    }
+
+    // Hàm thông minh phân tích tên file để tự động gán mã ngôn ngữ chuẩn quốc tế (ISO 639-2)
+    fn detect_language_from_filename(path: &str) -> &'static str {
+        let lower = path.to_lowercase();
+        if lower.contains(".vi.") || lower.contains("_vi.") || lower.contains("vi.vtt") || lower.contains("vietnamese") {
+            "vie"
+        } else if lower.contains(".zh.") || lower.contains("_zh.") || lower.contains("zh.vtt") || lower.contains("cn") || lower.contains("chinese") {
+            "chi"
+        } else if lower.contains(".en.") || lower.contains("_en.") || lower.contains("en.vtt") || lower.contains("english") {
+            "eng"
+        } else if lower.contains(".ja.") || lower.contains("_ja.") || lower.contains("ja.vtt") || lower.contains("japanese") {
+            "jpn"
+        } else if lower.contains(".ko.") || lower.contains("_ko.") || lower.contains("ko.vtt") || lower.contains("korean") {
+            "kor"
+        } else {
+            "und" // Mặc định nếu không nhận diện được chuỗi ngôn ngữ
         }
     }
 }
@@ -214,7 +239,7 @@ impl VideoMergerApp {
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([700.0, 500.0]), // Mở rộng kích thước cửa sổ mặc định
+            .with_inner_size([750.0, 550.0]),
         ..Default::default()
     };
     
