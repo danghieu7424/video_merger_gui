@@ -1,5 +1,6 @@
 use eframe::egui;
 use std::process::Command;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use rfd::FileDialog;
 
 struct VideoMergerApp {
@@ -11,10 +12,16 @@ struct VideoMergerApp {
     reencode_video: bool,
     video_codec: String,
     status_message: String,
+    is_processing: bool,
+
+    // Kênh truyền tin (channel) giữa background thread và UI thread
+    rx: Receiver<Result<String, String>>,
+    tx: Sender<Result<String, String>>,
 }
 
 impl Default for VideoMergerApp {
     fn default() -> Self {
+        let (tx, rx) = channel();
         Self {
             video_path: String::new(),
             audio_paths: Vec::new(),
@@ -23,6 +30,9 @@ impl Default for VideoMergerApp {
             reencode_video: false,
             video_codec: String::from("copy"),
             status_message: String::from("Sẵn sàng. Vui lòng chọn các file đầu vào."),
+            is_processing: false,
+            rx,
+            tx,
         }
     }
 }
@@ -49,6 +59,15 @@ impl VideoMergerApp {
 
 impl eframe::App for VideoMergerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Kiểm tra kết quả từ background thread trả về
+        if let Ok(result) = self.rx.try_recv() {
+            self.is_processing = false;
+            match result {
+                Ok(msg) => self.status_message = format!("✅ {}", msg),
+                Err(err) => self.status_message = format!("❌ Lỗi: {}", err),
+            }
+        }
+
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10.0, 10.0);
         style.spacing.button_padding = egui::vec2(12.0, 8.0);
@@ -62,7 +81,7 @@ impl eframe::App for VideoMergerApp {
 
             // --- 1. CHỌN VIDEO GỐC ---
             ui.horizontal(|ui| {
-                if ui.button("📁 Chọn Video Gốc (.mp4)").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("📁 Chọn Video Gốc (.mp4)")).clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         self.video_path = path.display().to_string();
                     }
@@ -79,7 +98,7 @@ impl eframe::App for VideoMergerApp {
 
             // --- 2. CHỌN ÂM THANH (Hỗ trợ chọn nhiều file cùng lúc) ---
             ui.horizontal(|ui| {
-                if ui.button("🎵 Thêm File Audio (MP3/AAC/MP4)").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("🎵 Thêm File Audio (MP3/AAC/MP4)")).clicked() {
                     if let Some(paths) = FileDialog::new().pick_files() {
                         for path in paths {
                             self.audio_paths.push(path.display().to_string());
@@ -87,7 +106,7 @@ impl eframe::App for VideoMergerApp {
                     }
                 }
                 ui.label(format!("Đã chọn: {} audio track", self.audio_paths.len()));
-                if ui.button("🗑 Xóa hết").clicked() {
+                if ui.add_enabled(!self.is_processing && !self.audio_paths.is_empty(), egui::Button::new("🗑 Xóa hết")).clicked() {
                     self.audio_paths.clear();
                 }
             });
@@ -103,7 +122,7 @@ impl eframe::App for VideoMergerApp {
 
             // --- 3. CHỌN PHỤ ĐỀ (Hỗ trợ chọn nhiều file .vtt / .srt) ---
             ui.horizontal(|ui| {
-                if ui.button("💬 Thêm Phụ Đề (.vtt / .srt)").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("💬 Thêm Phụ Đề (.vtt / .srt)")).clicked() {
                     if let Some(paths) = FileDialog::new().pick_files() {
                         for path in paths {
                             self.sub_paths.push(path.display().to_string());
@@ -111,7 +130,7 @@ impl eframe::App for VideoMergerApp {
                     }
                 }
                 ui.label(format!("Đã chọn: {} sub track", self.sub_paths.len()));
-                if ui.button("🗑 Xóa hết").clicked() {
+                if ui.add_enabled(!self.is_processing && !self.sub_paths.is_empty(), egui::Button::new("🗑 Xóa hết")).clicked() {
                     self.sub_paths.clear();
                 }
             });
@@ -126,7 +145,7 @@ impl eframe::App for VideoMergerApp {
             ui.separator();
 
             // --- 4. TÙY CHỌN NÂNG CAO ---
-            ui.collapsing("⚙ Tùy chọn nâng cao (Codec & Chất lượng)", |ui| {
+            ui.collapsing("⚙ Tùy chọn nâng cao (Codec & Đường dẫn lưu)", |ui| {
                 ui.checkbox(&mut self.reencode_video, "Encode lại video (Dùng khi cần thay đổi chất lượng/codec)");
                 if self.reencode_video {
                     ui.horizontal(|ui| {
@@ -136,21 +155,54 @@ impl eframe::App for VideoMergerApp {
                 } else {
                     self.video_codec = String::from("copy");
                 }
+
+                ui.horizontal(|ui| {
+                    ui.label("File xuất ra:");
+                    ui.text_edit_singleline(&mut self.output_path);
+                    if ui.button("📂 Lưu tại...").clicked() {
+                        if let Some(path) = FileDialog::new().set_file_name(&self.output_path).save_file() {
+                            self.output_path = path.display().to_string();
+                        }
+                    }
+                });
             });
 
             ui.separator();
             ui.add_space(5.0);
 
-            // --- 5. NÚT THỰC THI ---
-            if ui.button("🚀 Bắt đầu Quá Trình Merge").clicked() {
-                if self.video_path.is_empty() {
-                    self.status_message = String::from("❌ Lỗi: Chưa chọn video gốc!");
-                } else {
-                    match self.run_ffmpeg_merge() {
-                        Ok(_) => self.status_message = String::from("✅ Gộp file thành công: output.mkv"),
-                        Err(e) => self.status_message = format!("❌ Lỗi: {}", e),
-                    }
-                }
+            // --- 5. NÚT THỰC THI (DISABLE KHI CHƯA ĐỦ ĐIỀU KIỆN HOẶC ĐANG XỬ LÝ) ---
+            // Điều kiện hợp lệ: Phải có video gốc và ít nhất 1 audio hoặc 1 phụ đề
+            let is_input_ready = !self.video_path.is_empty() && (!self.audio_paths.is_empty() || !self.sub_paths.is_empty());
+            let can_start = is_input_ready && !self.is_processing;
+
+            let button_text = if self.is_processing {
+                "⏳ Đang gộp file (Vui lòng đợi)..."
+            } else {
+                "🚀 Bắt đầu Quá Trình Merge"
+            };
+
+            if ui.add_enabled(can_start, egui::Button::new(button_text)).clicked() {
+                self.is_processing = true;
+                self.status_message = String::from("Đang chạy FFmpeg ngầm trong hệ thống...");
+
+                let tx = self.tx.clone();
+                let video_path = self.video_path.clone();
+                let audio_paths = self.audio_paths.clone();
+                let sub_paths = self.sub_paths.clone();
+                let video_codec = self.video_codec.clone();
+                let output_path = self.output_path.clone();
+
+                // Spawning background worker thread để bảo vệ UI thread không bị treo (freeze) hay crash do OS
+                std::thread::spawn(move || {
+                    let result = Self::execute_ffmpeg_merge(
+                        &video_path,
+                        &audio_paths,
+                        &sub_paths,
+                        &video_codec,
+                        &output_path,
+                    );
+                    let _ = tx.send(result);
+                });
             }
 
             ui.add_space(10.0);
@@ -161,18 +213,32 @@ impl eframe::App for VideoMergerApp {
     }
 }
 
+/****
+ * Thực thi lệnh FFmpeg trong luồng Worker độc lập để tránh đóng băng (freeze/crash) giao diện GUI.
+ * Đầu vào: Đường dẫn video, danh sách audio, danh sách subtitle, codec, output path.
+ * Đầu ra: Result<String, String> báo cáo kết quả chi tiết cho UI.
+ ****/
 impl VideoMergerApp {
-    fn run_ffmpeg_merge(&self) -> Result<(), String> {
+    fn execute_ffmpeg_merge(
+        video_path: &str,
+        audio_paths: &[String],
+        sub_paths: &[String],
+        video_codec: &str,
+        output_path: &str,
+    ) -> Result<String, String> {
         let mut cmd = Command::new("ffmpeg");
 
-        // 1. Khai báo lần lượt các input file vào FFmpeg
-        cmd.arg("-i").arg(&self.video_path);
+        // Ghi đè file nếu đã tồn tại (-y) tránh việc ffmpeg dừng đợi prompt stdin
+        cmd.arg("-y");
 
-        for audio in &self.audio_paths {
+        // 1. Khai báo lần lượt các input file vào FFmpeg
+        cmd.arg("-i").arg(video_path);
+
+        for audio in audio_paths {
             cmd.arg("-i").arg(audio);
         }
 
-        for sub in &self.sub_paths {
+        for sub in sub_paths {
             cmd.arg("-i").arg(sub);
         }
 
@@ -181,45 +247,46 @@ impl VideoMergerApp {
         cmd.arg("-map").arg("0:v:0");
 
         // Map audio: bắt đầu từ audio của video gốc (index 0) đến các audio bổ sung tiếp theo
-        let total_audio_inputs = 1 + self.audio_paths.len();
+        let total_audio_inputs = 1 + audio_paths.len();
         for i in 0..total_audio_inputs {
             cmd.arg("-map").arg(format!("{}:a:0", i));
         }
 
         // Map subtitle: bắt đầu từ index ngay sau các file audio
         let base_sub_index = total_audio_inputs;
-        for (i, _) in self.sub_paths.iter().enumerate() {
+        for (i, _) in sub_paths.iter().enumerate() {
             cmd.arg("-map").arg(format!("{}:s:0", base_sub_index + i));
         }
 
         // 3. Cấu hình Codec đầu ra
-        cmd.arg("-c:v").arg(&self.video_codec);
+        cmd.arg("-c:v").arg(video_codec);
         cmd.arg("-c:a").arg("aac");
         cmd.arg("-c:s").arg("webvtt");
 
         // 4. Gán Metadata ngôn ngữ động cho Audio gốc
-        let video_audio_lang = Self::detect_language_from_filename(&self.video_path);
+        let video_audio_lang = Self::detect_language_from_filename(video_path);
         cmd.arg("-metadata:s:a:0").arg(format!("language={}", video_audio_lang));
 
         // 5. Gán Metadata ngôn ngữ động cho các Audio bổ sung (index từ 1 trở đi)
-        for (i, audio_path) in self.audio_paths.iter().enumerate() {
+        for (i, audio_path) in audio_paths.iter().enumerate() {
             let lang = Self::detect_language_from_filename(audio_path);
             cmd.arg(format!("-metadata:s:a:{}", i + 1)).arg(format!("language={}", lang));
         }
 
         // 6. Gán Metadata ngôn ngữ động cho Subtitle streams (index từ 0 trở đi)
-        for (i, sub_path) in self.sub_paths.iter().enumerate() {
+        for (i, sub_path) in sub_paths.iter().enumerate() {
             let lang = Self::detect_language_from_filename(sub_path);
             cmd.arg(format!("-metadata:s:s:{}", i)).arg(format!("language={}", lang));
         }
 
-        cmd.arg("output.mkv");
+        cmd.arg(output_path);
 
-        let status = cmd.status().map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
+        let output = cmd.output().map_err(|e| format!("Không thể chạy FFmpeg: {}", e))?;
+        if output.status.success() {
+            Ok(format!("Gộp file hoàn tất thành công -> {}", output_path))
         } else {
-            Err(String::from("FFmpeg thực thi thất bại, kiểm tra lại định dạng file hoặc cú pháp lệnh."))
+            let stderr_msg = String::from_utf8_lossy(&output.stderr);
+            Err(format!("FFmpeg lỗi:\n{}", stderr_msg.chars().take(400).collect::<String>()))
         }
     }
 
