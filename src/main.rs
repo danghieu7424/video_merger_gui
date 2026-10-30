@@ -2,6 +2,8 @@ use eframe::egui;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use rfd::FileDialog;
 
@@ -40,6 +42,9 @@ struct VideoMergerApp {
     status_message: String,
     is_processing: bool,
 
+    // Cờ báo hủy tác vụ khẩn cấp (Cancel flag)
+    cancel_flag: Arc<AtomicBool>,
+
     // Dữ liệu tiến độ Pipeline hiển thị trên GUI
     progress_ratio: f32,
     progress_line: String,
@@ -67,6 +72,7 @@ impl Default for VideoMergerApp {
             video_codec: String::from("copy"),
             status_message: String::from("Sẵn sàng. Vui lòng chọn các file đầu vào."),
             is_processing: false,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
             progress_ratio: 0.0,
             progress_line: String::new(),
             detail_log: String::new(),
@@ -102,6 +108,7 @@ impl VideoMergerApp {
 impl eframe::App for VideoMergerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Kiểm tra thông điệp tiến độ từ background thread gửi về
+        let mut should_repaint = false;
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 MergeProgressMsg::Progress {
@@ -115,22 +122,26 @@ impl eframe::App for VideoMergerApp {
                     self.progress_line = format!(
                         "Pipeline: [{pct_int}/100 % ({elapsed_secs}s)] - Đã xử lý {current_time_secs}s / {total_secs}s"
                     );
-                    ctx.request_repaint(); // Yêu cầu vẽ lại UI mượt mà theo từng frame tiến độ
+                    should_repaint = true;
                 }
                 MergeProgressMsg::Success(msg) => {
                     self.is_processing = false;
                     self.progress_ratio = 1.0;
                     self.status_message = String::from("Hoàn tất!");
                     self.detail_log = format!("⤷ {}", msg);
-                    ctx.request_repaint();
+                    should_repaint = true;
                 }
                 MergeProgressMsg::Error(err) => {
                     self.is_processing = false;
-                    self.status_message = format!("❌ Lỗi: {}", err);
-                    self.detail_log = format!("⤷ Quá trình dừng lại do lỗi.");
-                    ctx.request_repaint();
+                    self.status_message = format!("❌ {}", err);
+                    self.detail_log = format!("⤷ Quá trình dừng lại.");
+                    should_repaint = true;
                 }
             }
+        }
+
+        if should_repaint {
+            ctx.request_repaint();
         }
 
         let mut style = (*ctx.style()).clone();
@@ -288,41 +299,54 @@ impl VideoMergerApp {
         let is_input_ready = !self.video_path.is_empty() && (!self.audio_paths.is_empty() || !self.sub_paths.is_empty());
         let can_start = is_input_ready && !self.is_processing;
 
-        let button_text = if self.is_processing {
-            "⏳ Đang gộp file (Vui lòng đợi)..."
-        } else {
-            "🚀 Bắt đầu Quá Trình Merge"
-        };
+        ui.horizontal(|ui| {
+            let button_text = if self.is_processing {
+                "⏳ Đang gộp file (Vui lòng đợi)..."
+            } else {
+                "🚀 Bắt đầu Quá Trình Merge"
+            };
 
-        if ui.add_enabled(can_start, egui::Button::new(egui::RichText::new(button_text).heading())).clicked() {
-            self.is_processing = true;
-            self.progress_ratio = 0.0;
-            self.progress_line = String::from("Pipeline: Khởi động...");
-            self.detail_log = String::new();
-            self.status_message = String::from("Đang chạy FFmpeg ngầm trong hệ thống...");
+            if ui.add_enabled(can_start, egui::Button::new(egui::RichText::new(button_text).heading())).clicked() {
+                self.is_processing = true;
+                self.progress_ratio = 0.0;
+                self.progress_line = String::from("Pipeline: Khởi động...");
+                self.detail_log = String::new();
+                self.status_message = String::from("Đang chạy FFmpeg ngầm trong hệ thống...");
+                self.cancel_flag.store(false, Ordering::Relaxed);
 
-            let tx = self.tx.clone();
-            let video_path = self.video_path.clone();
-            let audio_paths = self.audio_paths.clone();
-            let sub_paths = self.sub_paths.clone();
-            let video_codec = self.video_codec.clone();
-            let output_path = self.output_path.clone();
-            let total_duration = self.total_duration_secs;
-            let replace_existing_subs = self.has_existing_subs && self.replace_existing_subs;
+                let tx = self.tx.clone();
+                let video_path = self.video_path.clone();
+                let audio_paths = self.audio_paths.clone();
+                let sub_paths = self.sub_paths.clone();
+                let video_codec = self.video_codec.clone();
+                let output_path = self.output_path.clone();
+                let total_duration = self.total_duration_secs;
+                let replace_existing_subs = self.has_existing_subs && self.replace_existing_subs;
+                let cancel_flag = self.cancel_flag.clone();
 
-            std::thread::spawn(move || {
-                Self::execute_ffmpeg_merge(
-                    &video_path,
-                    &audio_paths,
-                    &sub_paths,
-                    &video_codec,
-                    &output_path,
-                    total_duration,
-                    replace_existing_subs,
-                    &tx,
-                );
-            });
-        }
+                std::thread::spawn(move || {
+                    Self::execute_ffmpeg_merge(
+                        &video_path,
+                        &audio_paths,
+                        &sub_paths,
+                        &video_codec,
+                        &output_path,
+                        total_duration,
+                        replace_existing_subs,
+                        cancel_flag,
+                        &tx,
+                    );
+                });
+            }
+
+            // Nút Hủy Tiến Trình nếu người dùng muốn dừng giữa chừng
+            if self.is_processing {
+                if ui.button(egui::RichText::new("🛑 Dừng Ngay").heading().color(egui::Color32::from_rgb(255, 90, 90))).clicked() {
+                    self.cancel_flag.store(true, Ordering::Relaxed);
+                    self.status_message = String::from("Đang gửi lệnh dừng FFmpeg...");
+                }
+            }
+        });
 
         ui.add_space(5.0);
 
@@ -409,6 +433,7 @@ impl VideoMergerApp {
         output_path: &str,
         total_duration: f64,
         replace_existing_subs: bool,
+        cancel_flag: Arc<AtomicBool>,
         tx: &Sender<MergeProgressMsg>,
     ) {
         let mut cmd = Command::new("ffmpeg");
@@ -492,13 +517,20 @@ impl VideoMergerApp {
             let mut last_emit = Instant::now();
 
             for line in reader.lines().flatten() {
+                // Kiểm tra nếu người dùng nhấn nút Hủy khẩn cấp
+                if cancel_flag.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = tx.send(MergeProgressMsg::Error(String::from("Đã hủy quá trình theo yêu cầu của bạn.")));
+                    return;
+                }
+
                 // CHỈ parse out_time_us (microsecond) để đảm bảo độ chính xác tuyệt đối
                 if line.starts_with("out_time_us=") {
                     let parts: Vec<&str> = line.split('=').collect();
                     if parts.len() == 2 {
                         if let Ok(time_us) = parts[1].trim().parse::<u64>() {
-                            // Giới hạn tần số gửi tin: tối đa 15 tin/giây (~66ms) để UI render siêu mượt, không giật lag
-                            if last_emit.elapsed().as_millis() >= 66 {
+                            // Giới hạn tần số gửi tin: 10 tin/giây (~100ms) để UI luôn nhẹ êm 60 FPS
+                            if last_emit.elapsed().as_millis() >= 100 {
                                 last_emit = Instant::now();
                                 let current_secs = time_us / 1_000_000;
                                 let elapsed_secs = start_time.elapsed().as_secs();

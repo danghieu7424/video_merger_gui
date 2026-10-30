@@ -1,0 +1,15 @@
+# Script tự động đóng gói ứng dụng ra thư mục dist
+$ErrorActionPreference = "Stop"
+
+Write-Host ">>> [1/3] Đang biên dịch bản Release tối ưu hóa..." -ForegroundColor Cyan
+cargo build --release
+
+Write-Host ">>> [2/3] Chuẩn bị thư mục dist/..." -ForegroundColor Cyan
+if (!(Test-Path "dist")) {
+    New-Item -ItemType Directory -Path "dist" | Out-Null
+}
+
+Write-Host ">>> [3/3] Sao chép tệp thực thi và tài liệu..." -ForegroundColor Cyan
+Copy-Item "target\release\video_merger_gui.exe" "dist\" -Force
+
+Write-Host ">>> HOÀN TẤT! Sản phẩm sẵn sàng tại: dist\video_merger_gui.exe" -ForegroundColor Green
